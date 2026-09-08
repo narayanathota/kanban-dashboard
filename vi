@@ -1,0 +1,3 @@
+upstream kanban_upstream {
+    server kanban-dashboard-blue:8080;
+}
