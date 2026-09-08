@@ -1,12 +1,10 @@
-pipeline {
+ipipeline {
   agent any
 
   environment {
-    IMAGE_REPO  = 'narayanababut/kanban-dashboard'
-    APP_NAME    = 'kanban-dashboard'
-    APP_PORT    = '80'
-    CONT_PORT   = '8080'
-    CANARY_PORT = '8081'
+    IMAGE_REPO = 'narayanababut/kanban-dashboard'
+    APP_NAME   = 'kanban-dashboard'
+    EDGE_DIR   = '/opt/kanban-edge'
   }
 
   options {
@@ -56,48 +54,46 @@ pipeline {
       }
     }
 
-    stage('Deploy (canary alongside old)') {
+    stage('Blue-Green deploy') {
       steps {
         sh '''
-          docker inspect --format='{{.Config.Image}}' $APP_NAME > .old_image 2>/dev/null || echo none > .old_image
-          echo "Previous image: $(cat .old_image)"
+          set -e
+          ACTIVE=$(cat ${EDGE_DIR}/active_color 2>/dev/null || echo blue)
+          if [ "$ACTIVE" = "blue" ]; then TARGET=green; else TARGET=blue; fi
+          echo "Active=$ACTIVE  ->  Target=$TARGET"
+
           docker pull $IMAGE
-          docker rm -f ${APP_NAME}-canary 2>/dev/null || true
-          docker run -d --name ${APP_NAME}-canary \
+          docker rm -f ${APP_NAME}-${TARGET} 2>/dev/null || true
+          docker run -d --name ${APP_NAME}-${TARGET} --network web \
             --restart unless-stopped --memory 256m --memory-swap 256m --cpus 0.5 \
-            -p ${CANARY_PORT}:${CONT_PORT} $IMAGE
-        '''
-      }
-    }
+            $IMAGE
 
-    stage('Health check canary') {
-      steps {
-        sh '''
+          # wait until the NEW container is healthy (old one still serving)
           ok=0
-          for i in $(seq 1 15); do
-            if curl -fsS http://localhost:${CANARY_PORT}/healthz >/dev/null; then ok=1; break; fi
-            sleep 2
+          for i in $(seq 1 20); do
+            hs=$(docker inspect --format='{{.State.Health.Status}}' ${APP_NAME}-${TARGET} 2>/dev/null || echo starting)
+            if [ "$hs" = healthy ] && docker exec edge wget -q --spider http://${APP_NAME}-${TARGET}:8080/healthz; then
+              ok=1; echo "target healthy"; break
+            fi
+            echo "waiting ($hs)"; sleep 3
           done
-          [ "$ok" = 1 ] || { echo "canary failed HTTP check"; exit 1; }
-          for i in $(seq 1 10); do
-            hs=$(docker inspect --format='{{.State.Health.Status}}' ${APP_NAME}-canary)
-            echo "HEALTHCHECK: $hs"; [ "$hs" = healthy ] && break; sleep 3
-          done
-          [ "$hs" = healthy ] || { echo "canary not healthy"; exit 1; }
-        '''
-      }
-    }
+          [ "$ok" = 1 ] || { echo "target never healthy"; exit 1; }
 
-    stage('Promote to production') {
-      steps {
-        sh '''
-          docker rm -f $APP_NAME 2>/dev/null || true
-          docker run -d --name $APP_NAME \
-            --restart unless-stopped --memory 256m --memory-swap 256m --cpus 0.5 \
-            -p ${APP_PORT}:${CONT_PORT} $IMAGE
-          sleep 3
-          curl -fsS http://localhost:${APP_PORT}/healthz
-          docker rm -f ${APP_NAME}-canary 2>/dev/null || true
+          # switch traffic: rewrite upstream + graceful reload
+          cat > ${EDGE_DIR}/conf.d/upstream.conf <<UPS
+upstream kanban_upstream {
+    server ${APP_NAME}-${TARGET}:8080;
+}
+UPS
+          docker exec edge nginx -t
+          docker exec edge nginx -s reload
+          sleep 2
+          curl -fsS http://localhost/healthz
+
+          # retire the old color
+          echo "$TARGET" > ${EDGE_DIR}/active_color
+          docker rm -f ${APP_NAME}-${ACTIVE} 2>/dev/null || true
+          echo "Now serving $TARGET"
         '''
       }
     }
@@ -105,21 +101,16 @@ pipeline {
 
   post {
     failure {
-      echo 'Pipeline failed - rolling back'
+      echo 'Deploy failed - proxy untouched, old version still serving'
       sh '''
-        OLD=$(cat .old_image 2>/dev/null || echo none)
-        docker rm -f ${APP_NAME}-canary 2>/dev/null || true
-        if [ "$OLD" != none ] && [ -n "$OLD" ]; then
-          docker rm -f $APP_NAME 2>/dev/null || true
-          docker run -d --name $APP_NAME \
-            --restart unless-stopped --memory 256m --memory-swap 256m --cpus 0.5 \
-            -p ${APP_PORT}:${CONT_PORT} $OLD
-          echo "Rolled back to $OLD"
-        fi
+        ACTIVE=$(cat ${EDGE_DIR}/active_color 2>/dev/null || echo blue)
+        if [ "$ACTIVE" = "blue" ]; then TARGET=green; else TARGET=blue; fi
+        docker rm -f ${APP_NAME}-${TARGET} 2>/dev/null || true
+        echo "Cleaned up failed $TARGET container; $ACTIVE unaffected"
       '''
     }
     success {
-      echo "Deployed $IMAGE"
+      echo "Deployed $IMAGE with zero downtime"
       sh 'docker image prune -f || true'
     }
   }
