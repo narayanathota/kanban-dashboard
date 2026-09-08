@@ -2,7 +2,6 @@ pipeline {
   agent any
 
   environment {
-    REGISTRY    = 'docker.io'
     IMAGE_REPO  = 'narayanababut/kanban-dashboard'
     APP_NAME    = 'kanban-dashboard'
     APP_PORT    = '80'
@@ -46,17 +45,16 @@ pipeline {
     stage('Push to registry') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'dockerhub',
-               usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
-           sh '''
-             echo "token length: ${#REG_PASS}"
-             printf '%s' "$REG_PASS" | docker login -u "$REG_USER" --password-stdin
-             docker push $IMAGE
-             docker push $IMAGE_REPO:latest
-             docker logout
-           '''
-         }
-       }
-     } 
+              usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
+          sh '''
+            printf '%s' "$REG_PASS" | docker login -u "$REG_USER" --password-stdin
+            docker push $IMAGE
+            docker push $IMAGE_REPO:latest
+            docker logout
+          '''
+        }
+      }
+    }
 
     stage('Deploy (canary alongside old)') {
       steps {
@@ -99,7 +97,7 @@ pipeline {
             -p ${APP_PORT}:${CONT_PORT} $IMAGE
           sleep 3
           curl -fsS http://localhost:${APP_PORT}/healthz
-          docker rm -f ${APP_NAME}-canary
+          docker rm -f ${APP_NAME}-canary 2>/dev/null || true
         '''
       }
     }
@@ -126,4 +124,3 @@ pipeline {
     }
   }
 }
-EOF
