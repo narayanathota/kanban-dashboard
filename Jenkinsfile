@@ -46,16 +46,17 @@ pipeline {
     stage('Push to registry') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'dockerhub',
-              usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
-          sh '''
-            echo "$REG_PASS" | docker login -u "$REG_USER" --password-stdin $REGISTRY
-            docker push $IMAGE
-            docker push $IMAGE_REPO:latest
-            docker logout $REGISTRY
-          '''
-        }
-      }
-    }
+               usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
+           sh '''
+             echo "token length: ${#REG_PASS}"
+             printf '%s' "$REG_PASS" | docker login -u "$REG_USER" --password-stdin
+             docker push $IMAGE
+             docker push $IMAGE_REPO:latest
+             docker logout
+           '''
+         }
+       }
+     } 
 
     stage('Deploy (canary alongside old)') {
       steps {
